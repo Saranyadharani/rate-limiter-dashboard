@@ -1,36 +1,84 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# RateLimiter Pro
+
+A full-stack rate limiting dashboard built with Next.js, React, and TypeScript to demonstrate API request throttling using Token Bucket and Sliding Window algorithms. The application provides configurable endpoint-based rate limiting along with real-time request analytics and monitoring.
+
+## Features
+
+- Token Bucket and Sliding Window rate limiting
+- Endpoint-specific request limits
+- Real-time request monitoring dashboard
+- Response time and request analytics
+- HTTP 429 (Too Many Requests) handling
+- Interactive rate limit testing
+- Responsive UI built with Next.js and Tailwind CSS
+
+## Tech Stack
+
+- Next.js 16
+- React 19
+- TypeScript
+- Tailwind CSS
+- Axios
+- Recharts
+- Vercel
+
+## Supported Endpoints
+
+| Endpoint | Limit |
+|----------|-------|
+| `/login` | 5 requests / 5 seconds |
+| `/api/public` | 100 requests / 60 seconds |
+| `/api/private` | 50 requests / 60 seconds |
+| `/auth/verify` | 10 requests / 10 seconds |
+
+## Project Structure
+
+```
+app/            Application routes and UI
+public/         Static assets
+package.json    Project configuration
+```
 
 ## Getting Started
 
-First, run the development server:
+Clone the repository:
+
+```bash
+git clone https://github.com/Saranyadharani/rate-limiter-dashboard.git
+cd rate-limiter-dashboard
+```
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Run the development server:
 
 ```bash
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open `http://localhost:3000`.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+## Algorithms
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+- **Token Bucket** – Supports controlled burst traffic by replenishing tokens at a fixed rate.
+- **Sliding Window** – Tracks requests over a moving time window for more accurate rate limiting.
 
-## Learn More
+## Future Improvements
 
-To learn more about Next.js, take a look at the following resources:
+- Redis-backed distributed rate limiting
+- API key and JWT-based rate limiting
+- Persistent request storage
+- Role-based policies
+- Prometheus/Grafana monitoring
+- Docker and Kubernetes deployment
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+## Author
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+**Saranya M**
 
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+- GitHub: https://github.com/Saranyadharani
+- LinkedIn: https://linkedin.com/in/saranya-dharani
