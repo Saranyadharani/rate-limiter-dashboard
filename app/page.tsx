@@ -2,15 +2,13 @@
 
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import { 
-  Activity, Shield, Zap, Clock, CheckCircle, AlertCircle, 
-  TrendingUp, BarChart3, LineChart as LineChartIcon,
-  Gauge, Play, StopCircle, RefreshCw
+import {
+  Activity, Shield, Zap, Clock, CheckCircle, AlertCircle,
+  Play, StopCircle, RefreshCw, BarChart3
 } from 'lucide-react';
 import {
-  LineChart, Line, AreaChart, Area, BarChart, Bar,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
-  PieChart, Pie, Cell
+  BarChart, Bar, PieChart, Pie, Cell,
+  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
 } from 'recharts';
 
 interface Metrics {
@@ -54,7 +52,6 @@ export default function Home() {
 
   const API_BASE = 'https://saranyadharani-rate-limiter-api.hf.space';
 
-  // Fetch metrics every 5 seconds
   useEffect(() => {
     fetchMetrics();
     const interval = setInterval(fetchMetrics, 5000);
@@ -77,7 +74,7 @@ export default function Home() {
     try {
       const response = await axios.get(`${API_BASE}${endpoint}`);
       const responseTime = Date.now() - startTime;
-      
+
       const newRequest: RequestLog = {
         id: requests.length + 1,
         timestamp: Date.now(),
@@ -86,24 +83,24 @@ export default function Home() {
         responseTime: responseTime,
         clientIp: '127.0.0.1'
       };
-      
+
       setRequests(prev => [newRequest, ...prev].slice(0, 100));
-      
+
       const limit = response.headers['x-ratelimit-limit'];
       const remaining = response.headers['x-ratelimit-remaining'];
       if (limit && remaining) {
-        setRateLimits(prev => prev.map(rl => 
-          rl.endpoint === endpoint 
+        setRateLimits(prev => prev.map(rl =>
+          rl.endpoint === endpoint
             ? { ...rl, currentUsage: rl.limit - parseInt(remaining), remaining: parseInt(remaining), resetIn: 0 }
             : rl
         ));
       }
-      
+
       return response;
     } catch (error: any) {
       const responseTime = Date.now() - startTime;
       const status = error.response?.status || 500;
-      
+
       const newRequest: RequestLog = {
         id: requests.length + 1,
         timestamp: Date.now(),
@@ -112,29 +109,29 @@ export default function Home() {
         responseTime: responseTime,
         clientIp: '127.0.0.1'
       };
-      
+
       setRequests(prev => [newRequest, ...prev].slice(0, 100));
-      
+
       if (status === 429) {
         const retryAfter = error.response?.data?.retry_after || 5;
-        setRateLimits(prev => prev.map(rl => 
-          rl.endpoint === endpoint 
+        setRateLimits(prev => prev.map(rl =>
+          rl.endpoint === endpoint
             ? { ...rl, currentUsage: rl.limit, remaining: 0, resetIn: parseInt(retryAfter) }
             : rl
         ));
-        
+
         let countdown = parseInt(retryAfter);
         const interval = setInterval(() => {
           countdown--;
           if (countdown <= 0) {
             clearInterval(interval);
-            setRateLimits(prev => prev.map(rl => 
-              rl.endpoint === endpoint 
+            setRateLimits(prev => prev.map(rl =>
+              rl.endpoint === endpoint
                 ? { ...rl, currentUsage: 0, remaining: rl.limit, resetIn: 0 }
                 : rl
             ));
           } else {
-            setRateLimits(prev => prev.map(rl => 
+            setRateLimits(prev => prev.map(rl =>
               rl.endpoint === endpoint && rl.resetIn > 0
                 ? { ...rl, resetIn: countdown }
                 : rl
@@ -142,7 +139,7 @@ export default function Home() {
           }
         }, 1000);
       }
-      
+
       return error.response;
     }
   };
@@ -150,34 +147,27 @@ export default function Home() {
   const startLoadTest = async () => {
     setIsTesting(true);
     const requests_count = selectedEndpoint === '/login' ? 20 : 150;
-    
+
     for (let i = 0; i < requests_count; i++) {
       await sendRequest(selectedEndpoint);
       await new Promise(resolve => setTimeout(resolve, 50));
     }
-    
+
     setIsTesting(false);
   };
-
-  const requestTimeline = [...requests].reverse().slice(0, 50).map((req, idx) => ({
-    index: idx + 1,
-    responseTime: req.responseTime,
-    endpoint: req.endpoint,
-    status: req.status
-  }));
-
-  const statusDistribution = [
-    { name: 'Success (200)', value: requests.filter(r => r.status === 200).length, color: '#10b981' },
-    { name: 'Rate Limited (429)', value: requests.filter(r => r.status === 429).length, color: '#ef4444' },
-    { name: 'Other Errors', value: requests.filter(r => r.status !== 200 && r.status !== 429).length, color: '#f59e0b' },
-  ];
 
   const endpointStats = [
     { name: '/login', requests: requests.filter(r => r.endpoint === '/login' && r.status === 200).length, blocked: requests.filter(r => r.endpoint === '/login' && r.status === 429).length },
     { name: '/api/public', requests: requests.filter(r => r.endpoint === '/api/public' && r.status === 200).length, blocked: requests.filter(r => r.endpoint === '/api/public' && r.status === 429).length },
   ];
 
-  const avgResponseTime = requests.length > 0 
+  const statusDistribution = [
+    { name: 'Success', value: requests.filter(r => r.status === 200).length, color: '#10b981' },
+    { name: 'Rate Limited', value: requests.filter(r => r.status === 429).length, color: '#ef4444' },
+    { name: 'Other Errors', value: requests.filter(r => r.status !== 200 && r.status !== 429).length, color: '#f59e0b' },
+  ];
+
+  const avgResponseTime = requests.length > 0
     ? (requests.reduce((sum, r) => sum + r.responseTime, 0) / requests.length).toFixed(0)
     : 0;
 
@@ -207,7 +197,7 @@ export default function Home() {
                   {backendError ? 'Backend Offline' : 'System Online'}
                 </span>
               </div>
-              <button 
+              <button
                 onClick={fetchMetrics}
                 className="p-2 hover:bg-gray-800 rounded-lg transition text-gray-400"
               >
@@ -226,13 +216,13 @@ export default function Home() {
               <AlertCircle className="w-5 h-5 text-yellow-600" />
               <div>
                 <p className="text-sm font-medium text-yellow-800">Backend Not Reachable</p>
-                <p className="text-xs text-yellow-700">Make sure your rate limiter is running on port 9000: <code className="bg-yellow-100 px-2 py-0.5 rounded">python -m uvicorn app.main:app --reload --port 9000</code></p>
+                <p className="text-xs text-yellow-700">Make sure your rate limiter is running</p>
               </div>
             </div>
           </div>
         )}
 
-        {/* Stats Cards */}
+        {/* Stats Cards - Simplified (4 cards only) */}
         <div className="grid grid-cols-1 md:grid-cols-4 gap-5 mb-8">
           <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
             <div className="flex items-center justify-between mb-3">
@@ -242,7 +232,7 @@ export default function Home() {
             <div className="text-3xl font-bold text-gray-900">{requests.length}</div>
             <div className="text-xs text-gray-500 mt-1">In current session</div>
           </div>
-          
+
           <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
             <div className="flex items-center justify-between mb-3">
               <span className="text-gray-600 text-sm font-medium">Success Rate</span>
@@ -251,96 +241,88 @@ export default function Home() {
             <div className="text-3xl font-bold text-gray-900">{successRate}%</div>
             <div className="text-xs text-gray-500 mt-1">of total requests</div>
           </div>
-          
+
           <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
             <div className="flex items-center justify-between mb-3">
               <span className="text-gray-600 text-sm font-medium">Avg Response</span>
-              <Gauge className="w-5 h-5 text-blue-600" />
+              <Clock className="w-5 h-5 text-blue-600" />
             </div>
             <div className="text-3xl font-bold text-gray-900">{avgResponseTime}ms</div>
             <div className="text-xs text-gray-500 mt-1">response time</div>
           </div>
-          
+
           <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
             <div className="flex items-center justify-between mb-3">
-              <span className="text-gray-600 text-sm font-medium">Active Algorithms</span>
+              <span className="text-gray-600 text-sm font-medium">Algorithm</span>
               <Zap className="w-5 h-5 text-yellow-600" />
             </div>
-            <div className="text-3xl font-bold text-gray-900">2</div>
-            <div className="text-xs text-gray-500 mt-1">Token Bucket</div>
+            <div className="text-xl font-bold text-gray-900">Sliding Window</div>
+            <div className="text-xs text-gray-500 mt-1">Rate limiting algorithm</div>
           </div>
         </div>
 
-        {/* Charts Row */}
+        {/* Charts Row - Simplified (2 charts only) */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-          {/* Response Time Chart */}
+          {/* Endpoint Activity Chart */}
           <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200">
             <div className="flex items-center justify-between mb-5">
               <div>
-                <h3 className="font-semibold text-gray-900">Response Time Trend</h3>
-                <p className="text-xs text-gray-500 mt-1">Last 50 requests</p>
+                <h3 className="font-semibold text-gray-900">Endpoint Activity</h3>
+                <p className="text-xs text-gray-500 mt-1">Successful vs Rate Limited</p>
               </div>
-              <LineChartIcon className="w-5 h-5 text-gray-400" />
+              <BarChart3 className="w-5 h-5 text-gray-400" />
             </div>
             <ResponsiveContainer width="100%" height={250}>
-              <AreaChart data={requestTimeline}>
-                <defs>
-                  <linearGradient id="responseGradient" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#8b5cf6" stopOpacity={0.3}/>
-                    <stop offset="95%" stopColor="#8b5cf6" stopOpacity={0}/>
-                  </linearGradient>
-                </defs>
+              <BarChart data={endpointStats}>
                 <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="index" stroke="#6b7280" fontSize={12} />
+                <XAxis dataKey="name" stroke="#6b7280" fontSize={12} />
                 <YAxis stroke="#6b7280" fontSize={12} />
-                <Tooltip 
-                  contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px', color: '#374151' }}
-                  formatter={(value: any) => [`${value}ms`, 'Response Time']}
-                />
-                <Area type="monotone" dataKey="responseTime" stroke="#8b5cf6" fill="url(#responseGradient)" />
-              </AreaChart>
+                <Tooltip contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px' }} />
+                <Legend wrapperStyle={{ fontSize: '12px' }} />
+                <Bar dataKey="requests" name="Successful" fill="#10b981" radius={[8,8,0,0]} />
+                <Bar dataKey="blocked" name="Rate Limited" fill="#ef4444" radius={[8,8,0,0]} />
+              </BarChart>
             </ResponsiveContainer>
           </div>
 
-          {/* Status Distribution Pie Chart - Fixed Overlap */}
+          {/* Status Distribution Pie Chart */}
           <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200">
             <div className="flex items-center justify-between mb-5">
               <div>
-                <h3 className="font-semibold text-gray-900">Request Status Distribution</h3>
+                <h3 className="font-semibold text-gray-900">Status Distribution</h3>
                 <p className="text-xs text-gray-500 mt-1">Success vs Rate Limited</p>
               </div>
               <BarChart3 className="w-5 h-5 text-gray-400" />
             </div>
-            <ResponsiveContainer width="100%" height={280}>
+            <ResponsiveContainer width="100%" height={260}>
               <PieChart>
                 <Pie
                   data={statusDistribution}
                   cx="50%"
                   cy="50%"
-                  innerRadius={55}
-                  outerRadius={85}
+                  innerRadius={50}
+                  outerRadius={80}
                   paddingAngle={3}
                   dataKey="value"
                   label={({ percent }) => {
-  if (!percent) return '';
-  const percentage = (percent * 100).toFixed(0);
-  return percentage !== '0' ? `${percentage}%` : '';
-}}
+                    if (!percent) return '';
+                    const percentage = (percent * 100).toFixed(0);
+                    return percentage !== '0' ? `${percentage}%` : '';
+                  }}
                   labelLine={true}
                 >
                   {statusDistribution.map((entry, index) => (
                     <Cell key={`cell-${index}`} fill={entry.color} />
                   ))}
                 </Pie>
-                <Tooltip 
+                <Tooltip
                   formatter={(value: any, name: any) => [`${value} requests`, name]}
                   contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px' }}
                 />
-                <Legend 
+                <Legend
                   verticalAlign="bottom"
-                  height={40}
+                  height={36}
                   wrapperStyle={{ fontSize: '12px', color: '#374151' }}
-                  formatter={(value) => <span className="text-gray-700 text-xs">{value}</span>}
                 />
               </PieChart>
             </ResponsiveContainer>
@@ -355,7 +337,7 @@ export default function Home() {
               <p className="text-sm text-gray-500">Per-endpoint rate limiting configuration</p>
             </div>
           </div>
-          
+
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
             {rateLimits.map((rl, idx) => (
               <div key={idx} className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
@@ -427,25 +409,6 @@ export default function Home() {
               </button>
             </div>
           </div>
-
-          {/* Endpoint Stats Bar Chart */}
-          <div className="mt-6 pt-4 border-t border-gray-200">
-            <div className="flex items-center gap-2 mb-4">
-              <TrendingUp className="w-4 h-4 text-gray-500" />
-              <span className="text-sm font-medium text-gray-700">Endpoint Activity</span>
-            </div>
-            <ResponsiveContainer width="100%" height={220}>
-              <BarChart data={endpointStats}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="name" stroke="#6b7280" fontSize={12} />
-                <YAxis stroke="#6b7280" fontSize={12} />
-                <Tooltip contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px' }} />
-                <Legend wrapperStyle={{ fontSize: '12px' }} />
-                <Bar dataKey="requests" name="Successful Requests" fill="#10b981" radius={[8,8,0,0]} />
-                <Bar dataKey="blocked" name="Rate Limited" fill="#ef4444" radius={[8,8,0,0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
         </div>
 
         {/* Request Log Table */}
@@ -507,4 +470,4 @@ export default function Home() {
       </div>
     </div>
   );
-}"" 
+}
