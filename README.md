@@ -1,6 +1,6 @@
-# RateLimiter Pro
+# RateLimiter 
 
-Live demo: https://rate-limiter-dashboard-5bghc9xnv.vercel.app/
+Live demo: https://rate-limiter-dashboard-six.vercel.app/
 
 A full-stack rate limiting service and live dashboard built with **FastAPI**, **Redis**, and **Next.js**. The backend enforces per-endpoint throttling using **Token Bucket** and **Sliding Window** algorithms, and the frontend visualizes allowed vs. blocked traffic in real time.
 
@@ -9,6 +9,10 @@ A full-stack rate limiting service and live dashboard built with **FastAPI**, **
 The backend is a Python FastAPI service that uses Redis for atomic, cross-instance rate tracking via a **Lua script** — so the token bucket read-modify-write runs as a single operation and can't race when concurrent requests hit the same client. Redis `TIME` is called inside the script so multiple app instances never disagree on elapsed time. If Redis is down, the limiter falls back to an in-memory store instead of failing closed.
 
 The frontend polls `/metrics`, reads `X-RateLimit-*` headers from each response, and renders live traffic, latency (avg/p95), and block-rate KPIs. A built-in test console fires single requests or synthetic bursts so you can watch the bucket drain and refill.
+
+
+<img width="3260" height="1522" alt="image" src="https://github.com/user-attachments/assets/5efbcd0a-dec2-48a3-8af6-95e37e95a133" />
+
 
 ## Features
 
