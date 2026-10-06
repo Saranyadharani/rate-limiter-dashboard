@@ -11,7 +11,7 @@ The backend is a Python FastAPI service that uses Redis for atomic, cross-instan
 The frontend polls `/metrics`, reads `X-RateLimit-*` headers from each response, and renders live traffic, latency (avg/p95), and block-rate KPIs. A built-in test console fires single requests or synthetic bursts so you can watch the bucket drain and refill.
 
 
-<img width="3260" height="1522" alt="image" src="https://github.com/user-attachments/assets/5efbcd0a-dec2-48a3-8af6-95e37e95a133" />
+<img width="1616" height="748" alt="image" src="https://github.com/user-attachments/assets/30d3e941-55b2-4b25-b599-516e66a74062" />
 
 
 ## Features
