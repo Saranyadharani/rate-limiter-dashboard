@@ -1,26 +1,60 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/* palette: refined slate neutrals + teal accent, rose only for blocked traffic */
+@theme {
+  --color-canvas: #f8fafc;
+  --color-surface: #ffffff;
+  --color-line: #e2e8f0;
+  --color-line-soft: #f1f5f9;
+  --color-ink: #0f172a;
+  --color-ink-soft: #1e293b;
+  --color-muted: #64748b;
+  --color-nav: #0f172a;
+  --color-nav-soft: #1e293b;
+  --color-brand: #0d9488;
+  --color-brand-strong: #0f766e;
+  --color-brand-soft: #ecfdf5;
+  --color-bad: #e11d48;
+  --color-bad-soft: #fff1f2;
+  --color-warn: #d97706;
+  --color-warn-soft: #fffbeb;
+  --font-sans: var(--font-inter), var(--font-geist-sans);
+  --font-mono: var(--font-jetbrains-mono), var(--font-geist-mono);
 }
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
-}
-
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--color-canvas);
+  color: var(--color-ink);
+  font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  letter-spacing: -0.011em;
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+  font-feature-settings: "tnum";
+}
+
+/* refined scrollbars */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
 }

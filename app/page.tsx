@@ -1,473 +1,378 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import {
-  Activity, Shield, Zap, Clock, CheckCircle, AlertCircle,
-  Play, StopCircle, RefreshCw, BarChart3
-} from 'lucide-react';
-import {
-  BarChart, Bar, PieChart, Pie, Cell,
-  XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer
-} from 'recharts';
+import { Activity, Gauge, ShieldCheck, Play, Zap, RefreshCw, AlertTriangle } from 'lucide-react';
+import { AreaChart, Area, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
+// set NEXT_PUBLIC_API_BASE in .env.local (or your Vercel env) to point at the deployed API
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8000';
+
+interface Rule { name: string; prefix: string; capacity: number; refill_rate: number }
 interface Metrics {
-  service: string;
-  status: string;
-  algorithms: string[];
-  version: string;
+  service: string; status: string; algorithm: string; backend: string; version: string;
+  rules: Rule[]; allowed: Record<string, number>; blocked: Record<string, number>;
+}
+interface Log { id: number; ts: number; path: string; status: number; ms: number; left: number | null }
+interface Bucket { remaining: number; ts: number; blockedUntil: number }
+
+// same shape as the backend RULES, used until /metrics answers
+const DEFAULT_RULES: Rule[] = [
+  { name: 'login', prefix: '/login', capacity: 5, refill_rate: 1 },
+  { name: 'default', prefix: '/', capacity: 100, refill_rate: 100 / 60 },
+];
+const ROUTES = ['/', '/login', '/api/public'];
+const OK = '#0d9488';
+const BAD = '#e11d48';
+const WARN = '#d97706';
+
+const sum = (o?: Record<string, number>) => Object.values(o ?? {}).reduce((a, b) => a + b, 0);
+
+function Card({ title, sub, right, flush, className = '', children }: {
+  title: string; sub?: string; right?: React.ReactNode; flush?: boolean; className?: string; children: React.ReactNode;
+}) {
+  return (
+    <section className={`rounded-xl border border-line bg-surface shadow-sm shadow-slate-200/40 ${className}`}>
+      <header className="flex items-center justify-between gap-3 border-b border-line-soft px-5 py-3">
+        <div>
+          <h2 className="text-sm font-bold tracking-tight text-slate-900">{title}</h2>
+          {sub && <p className="mt-0.5 text-xs font-medium text-slate-500">{sub}</p>}
+        </div>
+        {right}
+      </header>
+      <div className={flush ? '' : 'p-5'}>{children}</div>
+    </section>
+  );
 }
 
-interface RequestLog {
-  id: number;
-  timestamp: number;
-  endpoint: string;
-  status: number;
-  responseTime: number;
-  clientIp: string;
-}
-
-interface RateLimitStats {
-  endpoint: string;
-  limit: number;
-  window: number;
-  currentUsage: number;
-  remaining: number;
-  resetIn: number;
-  color: string;
+function Kpi({ label, value, hint, icon: Icon, accent }: {
+  label: string; value: string; hint: string; icon: typeof Activity; accent?: string;
+}) {
+  return (
+    <div className="group relative overflow-hidden rounded-xl border border-line bg-surface px-5 py-4 shadow-sm shadow-slate-200/40 transition-shadow hover:shadow-md hover:shadow-slate-200/60">
+      <div className="flex items-center justify-between">
+        <span className="text-xs font-semibold uppercase tracking-wide text-slate-600">{label}</span>
+        <span
+          className="flex h-7 w-7 items-center justify-center rounded-lg"
+          style={{ background: accent ? `${accent}14` : '#0d948814', color: accent ?? '#0d9488' }}
+        >
+          <Icon className="h-3.5 w-3.5" />
+        </span>
+      </div>
+      <div className="tabular mt-2 text-[28px] font-bold leading-none tracking-tight text-slate-900">{value}</div>
+      <div className="mt-1.5 text-xs font-medium text-slate-500">{hint}</div>
+    </div>
+  );
 }
 
 export default function Home() {
   const [metrics, setMetrics] = useState<Metrics | null>(null);
-  const [requests, setRequests] = useState<RequestLog[]>([]);
-  const [isTesting, setIsTesting] = useState(false);
-  const [selectedEndpoint, setSelectedEndpoint] = useState('/login');
-  const [backendError, setBackendError] = useState(false);
-  const [rateLimits, setRateLimits] = useState<RateLimitStats[]>([
-    { endpoint: '/login', limit: 5, window: 5, currentUsage: 0, remaining: 5, resetIn: 0, color: '#f59e0b' },
-    { endpoint: '/api/public', limit: 100, window: 60, currentUsage: 0, remaining: 100, resetIn: 0, color: '#10b981' },
-    { endpoint: '/api/private', limit: 50, window: 60, currentUsage: 0, remaining: 50, resetIn: 0, color: '#8b5cf6' },
-    { endpoint: '/auth/verify', limit: 10, window: 10, currentUsage: 0, remaining: 10, resetIn: 0, color: '#ec4899' },
-  ]);
+  const [offline, setOffline] = useState(false);
+  const [logs, setLogs] = useState<Log[]>([]);
+  const [buckets, setBuckets] = useState<Record<string, Bucket>>({});
+  const [path, setPath] = useState('/login');
+  const [busy, setBusy] = useState(false);
+  const [now, setNow] = useState(0);
+  const idRef = useRef(0);
 
-  const API_BASE = 'https://saranyadharani-rate-limiter-api.hf.space';
+  const rules = metrics?.rules ?? DEFAULT_RULES;
+  const ruleFor = useCallback((p: string) => rules.find((r) => p.startsWith(r.prefix)) ?? rules[rules.length - 1], [rules]);
+
+  const fetchMetrics = useCallback(async () => {
+    try {
+      const res = await axios.get<Metrics>(`${API_BASE}/metrics`, { timeout: 4000 });
+      setMetrics(res.data);
+      setOffline(false);
+    } catch {
+      setOffline(true);
+    }
+  }, []);
 
   useEffect(() => {
     fetchMetrics();
-    const interval = setInterval(fetchMetrics, 5000);
-    return () => clearInterval(interval);
+    const poll = setInterval(fetchMetrics, 5000);
+    return () => clearInterval(poll);
+  }, [fetchMetrics]);
+
+  // one clock drives chart window, bucket refill animation and retry countdown
+  useEffect(() => {
+    setNow(Date.now());
+    const tick = setInterval(() => setNow(Date.now()), 500);
+    return () => clearInterval(tick);
   }, []);
 
-  const fetchMetrics = async () => {
+  const send = useCallback(async (p: string) => {
+    const t0 = performance.now();
+    let status = 0;
+    let h: Record<string, string> = {};
     try {
-      const response = await axios.get(`${API_BASE}/metrics`, { timeout: 3000 });
-      setMetrics(response.data);
-      setBackendError(false);
-    } catch (error) {
-      console.error('Backend not reachable:', error);
-      setBackendError(true);
+      const res = await axios.get(`${API_BASE}${p}`, { validateStatus: () => true, timeout: 8000 });
+      status = res.status;
+      h = res.headers as Record<string, string>;
+    } catch {
+      status = 0;
     }
+    const ts = Date.now();
+    const left = h['x-ratelimit-remaining'] !== undefined ? Number(h['x-ratelimit-remaining']) : null;
+    setLogs((prev) => [{ id: ++idRef.current, ts, path: p, status, ms: Math.round(performance.now() - t0), left }, ...prev].slice(0, 200));
+    if (left !== null) {
+      const retry = Number(h['retry-after'] ?? 0);
+      setBuckets((prev) => ({ ...prev, [ruleFor(p).name]: { remaining: left, ts, blockedUntil: status === 429 ? ts + retry * 1000 : 0 } }));
+    }
+  }, [ruleFor]);
+
+  const burst = async () => {
+    setBusy(true);
+    const rule = ruleFor(path);
+    const count = rule.name === 'login' ? rule.capacity + 5 : rule.capacity + 20;
+    // all at once, like a real traffic spike (one after another is too slow, the bucket refills in between)
+    await Promise.all(Array.from({ length: count }, () => send(path)));
+    await fetchMetrics();
+    setBusy(false);
   };
 
-  const sendRequest = async (endpoint: string) => {
-    const startTime = Date.now();
-    try {
-      const response = await axios.get(`${API_BASE}${endpoint}`);
-      const responseTime = Date.now() - startTime;
-
-      const newRequest: RequestLog = {
-        id: requests.length + 1,
-        timestamp: Date.now(),
-        endpoint: endpoint,
-        status: response.status,
-        responseTime: responseTime,
-        clientIp: '127.0.0.1'
-      };
-
-      setRequests(prev => [newRequest, ...prev].slice(0, 100));
-
-      const limit = response.headers['x-ratelimit-limit'];
-      const remaining = response.headers['x-ratelimit-remaining'];
-      if (limit && remaining) {
-        setRateLimits(prev => prev.map(rl =>
-          rl.endpoint === endpoint
-            ? { ...rl, currentUsage: rl.limit - parseInt(remaining), remaining: parseInt(remaining), resetIn: 0 }
-            : rl
-        ));
-      }
-
-      return response;
-    } catch (error: any) {
-      const responseTime = Date.now() - startTime;
-      const status = error.response?.status || 500;
-
-      const newRequest: RequestLog = {
-        id: requests.length + 1,
-        timestamp: Date.now(),
-        endpoint: endpoint,
-        status: status,
-        responseTime: responseTime,
-        clientIp: '127.0.0.1'
-      };
-
-      setRequests(prev => [newRequest, ...prev].slice(0, 100));
-
-      if (status === 429) {
-        const retryAfter = error.response?.data?.retry_after || 5;
-        setRateLimits(prev => prev.map(rl =>
-          rl.endpoint === endpoint
-            ? { ...rl, currentUsage: rl.limit, remaining: 0, resetIn: parseInt(retryAfter) }
-            : rl
-        ));
-
-        let countdown = parseInt(retryAfter);
-        const interval = setInterval(() => {
-          countdown--;
-          if (countdown <= 0) {
-            clearInterval(interval);
-            setRateLimits(prev => prev.map(rl =>
-              rl.endpoint === endpoint
-                ? { ...rl, currentUsage: 0, remaining: rl.limit, resetIn: 0 }
-                : rl
-            ));
-          } else {
-            setRateLimits(prev => prev.map(rl =>
-              rl.endpoint === endpoint && rl.resetIn > 0
-                ? { ...rl, resetIn: countdown }
-                : rl
-            ));
-          }
-        }, 1000);
-      }
-
-      return error.response;
-    }
+  // tokens the bucket should hold right now, using the same refill maths as the backend
+  const tokensNow = (r: Rule) => {
+    const b = buckets[r.name];
+    if (!b) return r.capacity;
+    return Math.min(r.capacity, b.remaining + ((now - b.ts) / 1000) * r.refill_rate);
   };
 
-  const startLoadTest = async () => {
-    setIsTesting(true);
-    const requests_count = selectedEndpoint === '/login' ? 20 : 150;
+  const allowed = logs.filter((l) => l.status >= 200 && l.status < 400).length;
+  const blocked = logs.filter((l) => l.status === 429).length;
+  const errors = logs.length - allowed - blocked;
 
-    for (let i = 0; i < requests_count; i++) {
-      await sendRequest(selectedEndpoint);
-      await new Promise(resolve => setTimeout(resolve, 50));
+  const serverTotal = sum(metrics?.allowed) + sum(metrics?.blocked);
+  const blockRate = serverTotal ? (sum(metrics?.blocked) / serverTotal) * 100 : 0;
+  const lat = logs.filter((l) => l.status > 0).map((l) => l.ms).sort((a, b) => a - b);
+  const avg = lat.length ? Math.round(lat.reduce((a, b) => a + b, 0) / lat.length) : 0;
+  const p95 = lat.length ? lat[Math.min(lat.length - 1, Math.floor(lat.length * 0.95))] : 0;
+
+  const series = useMemo(() => {
+    if (!now) return [];
+    const step = 5000;
+    const n = 12;
+    const end = (Math.floor(now / step) + 1) * step;
+    const start = end - n * step;
+    const rows = Array.from({ length: n }, (_, i) => ({
+      label: new Date(start + i * step).toLocaleTimeString([], { hour12: false, minute: '2-digit', second: '2-digit' }),
+      allowed: 0,
+      blocked: 0,
+    }));
+    for (const l of logs) {
+      const i = Math.floor((l.ts - start) / step);
+      if (i >= 0 && i < n) (l.status === 429 ? rows[i].blocked++ : rows[i].allowed++);
     }
+    return rows;
+  }, [logs, now]);
 
-    setIsTesting(false);
-  };
+  const chip = (s: number): [string, string] =>
+    s >= 200 && s < 400 ? ['Allowed', 'bg-brand-soft text-brand font-semibold']
+      : s === 429 ? ['Blocked', 'bg-bad-soft text-bad font-semibold']
+        : ['Error', 'bg-warn-soft text-warn font-semibold'];
 
-  const endpointStats = [
-    { name: '/login', requests: requests.filter(r => r.endpoint === '/login' && r.status === 200).length, blocked: requests.filter(r => r.endpoint === '/login' && r.status === 429).length },
-    { name: '/api/public', requests: requests.filter(r => r.endpoint === '/api/public' && r.status === 200).length, blocked: requests.filter(r => r.endpoint === '/api/public' && r.status === 429).length },
-  ];
-
-  const statusDistribution = [
-    { name: 'Success', value: requests.filter(r => r.status === 200).length, color: '#10b981' },
-    { name: 'Rate Limited', value: requests.filter(r => r.status === 429).length, color: '#ef4444' },
-    { name: 'Other Errors', value: requests.filter(r => r.status !== 200 && r.status !== 429).length, color: '#f59e0b' },
-  ];
-
-  const avgResponseTime = requests.length > 0
-    ? (requests.reduce((sum, r) => sum + r.responseTime, 0) / requests.length).toFixed(0)
-    : 0;
-
-  const successRate = requests.length > 0
-    ? ((requests.filter(r => r.status === 200).length / requests.length) * 100).toFixed(1)
-    : 0;
+  const selected = ruleFor(path);
 
   return (
-    <div className="min-h-screen bg-gray-100">
-      {/* Header */}
-      <div className="bg-gray-900 border-b border-gray-800 sticky top-0 z-10">
-        <div className="max-w-7xl mx-auto px-6 py-4">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl flex items-center justify-center">
-                <Shield className="w-5 h-5 text-white" />
-              </div>
-              <div>
-                <h1 className="text-xl font-bold text-white">RateLimiter Pro</h1>
-                <p className="text-xs text-gray-400">API Rate Limiting Dashboard</p>
-              </div>
+    <div className="min-h-screen">
+      <header className="sticky top-0 z-10 border-b border-white/5 bg-nav/95 backdrop-blur supports-[backdrop-filter]:bg-nav/80">
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-5">
+          <div className="flex items-center gap-3">
+            <div className="flex h-8 w-8 items-center justify-center rounded-lg bg-brand shadow-sm shadow-teal-900/40">
+              <ShieldCheck className="h-4 w-4 text-white" />
             </div>
-            <div className="flex items-center gap-4">
-              <div className={`flex items-center gap-2 px-3 py-1.5 rounded-full ${backendError ? 'bg-red-900/30' : 'bg-green-900/30'}`}>
-                <div className={`w-2 h-2 rounded-full animate-pulse ${backendError ? 'bg-red-500' : 'bg-green-500'}`}></div>
-                <span className={`text-xs font-medium ${backendError ? 'text-red-400' : 'text-green-400'}`}>
-                  {backendError ? 'Backend Offline' : 'System Online'}
-                </span>
-              </div>
-              <button
-                onClick={fetchMetrics}
-                className="p-2 hover:bg-gray-800 rounded-lg transition text-gray-400"
-              >
-                <RefreshCw className="w-4 h-4" />
-              </button>
-            </div>
+            <span className="text-sm font-bold tracking-tight text-white">Rate Limiter</span>
+          </div>
+          <div className="flex items-center gap-2">
+            <span className={`flex items-center gap-1.5 rounded-full px-2.5 py-1 text-xs font-semibold ${offline ? 'bg-bad/15 text-rose-300' : 'bg-brand/15 text-teal-300'}`}>
+              <span className={`h-1.5 w-1.5 rounded-full ${offline ? 'bg-bad' : 'bg-brand'} ${!offline ? 'animate-pulse' : ''}`} />
+              {offline ? 'API unreachable' : 'API healthy'}
+            </span>
+            <button onClick={fetchMetrics} aria-label="Refresh metrics" className="rounded-lg p-2 text-slate-400 transition-colors hover:bg-white/10 hover:text-white focus-visible:outline-2 focus-visible:outline-brand">
+              <RefreshCw className="h-4 w-4" />
+            </button>
           </div>
         </div>
-      </div>
+      </header>
 
-      <div className="max-w-7xl mx-auto px-6 py-8">
-        {/* Backend Warning */}
-        {backendError && (
-          <div className="mb-6 bg-yellow-50 border border-yellow-200 rounded-xl p-4">
-            <div className="flex items-center gap-3">
-              <AlertCircle className="w-5 h-5 text-yellow-600" />
-              <div>
-                <p className="text-sm font-medium text-yellow-800">Backend Not Reachable</p>
-                <p className="text-xs text-yellow-700">Make sure your rate limiter is running</p>
-              </div>
-            </div>
+      <main className="mx-auto max-w-7xl space-y-4 px-5 py-5">
+        {offline && (
+          <div className="flex items-center gap-2.5 rounded-xl border border-warn/30 bg-warn-soft px-4 py-3 text-xs font-semibold text-warn">
+            <AlertTriangle className="h-4 w-4 shrink-0" />
+            <span>Cannot reach <span className="font-mono">{API_BASE}</span>. Start the API or check NEXT_PUBLIC_API_BASE.</span>
           </div>
         )}
 
-        {/* Stats Cards - Simplified (4 cards only) */}
-        <div className="grid grid-cols-1 md:grid-cols-4 gap-5 mb-8">
-          <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-gray-600 text-sm font-medium">Total Requests</span>
-              <Activity className="w-5 h-5 text-purple-600" />
-            </div>
-            <div className="text-3xl font-bold text-gray-900">{requests.length}</div>
-            <div className="text-xs text-gray-500 mt-1">In current session</div>
-          </div>
-
-          <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-gray-600 text-sm font-medium">Success Rate</span>
-              <CheckCircle className="w-5 h-5 text-green-600" />
-            </div>
-            <div className="text-3xl font-bold text-gray-900">{successRate}%</div>
-            <div className="text-xs text-gray-500 mt-1">of total requests</div>
-          </div>
-
-          <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-gray-600 text-sm font-medium">Avg Response</span>
-              <Clock className="w-5 h-5 text-blue-600" />
-            </div>
-            <div className="text-3xl font-bold text-gray-900">{avgResponseTime}ms</div>
-            <div className="text-xs text-gray-500 mt-1">response time</div>
-          </div>
-
-          <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
-            <div className="flex items-center justify-between mb-3">
-              <span className="text-gray-600 text-sm font-medium">Algorithm</span>
-              <Zap className="w-5 h-5 text-yellow-600" />
-            </div>
-            <div className="text-xl font-bold text-gray-900">Sliding Window</div>
-            <div className="text-xs text-gray-500 mt-1">Rate limiting algorithm</div>
-          </div>
+        <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+          <Kpi label="Requests handled" value={serverTotal.toLocaleString()} hint="All clients, since API start" icon={Activity} />
+          <Kpi label="Block rate" value={`${blockRate.toFixed(1)}%`} hint={`${sum(metrics?.blocked).toLocaleString()} requests rejected`} icon={ShieldCheck} accent={BAD} />
+          <Kpi label="Latency" value={`${avg} ms`} hint={`p95 ${p95} ms · this session`} icon={Gauge} />
         </div>
 
-        {/* Charts Row - Simplified (2 charts only) */}
-        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-          {/* Endpoint Activity Chart */}
-          <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200">
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <h3 className="font-semibold text-gray-900">Endpoint Activity</h3>
-                <p className="text-xs text-gray-500 mt-1">Successful vs Rate Limited</p>
-              </div>
-              <BarChart3 className="w-5 h-5 text-gray-400" />
+        <Card
+          title="Traffic"
+          sub="Requests sent from this page, 5 second intervals"
+          right={
+            <div className="flex items-center gap-4 text-xs font-medium text-slate-600">
+              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-brand" />Allowed</span>
+              <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-bad" />Blocked</span>
             </div>
-            <ResponsiveContainer width="100%" height={250}>
-              <BarChart data={endpointStats}>
-                <CartesianGrid strokeDasharray="3 3" stroke="#e5e7eb" />
-                <XAxis dataKey="name" stroke="#6b7280" fontSize={12} />
-                <YAxis stroke="#6b7280" fontSize={12} />
-                <Tooltip contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px' }} />
-                <Legend wrapperStyle={{ fontSize: '12px' }} />
-                <Bar dataKey="requests" name="Successful" fill="#10b981" radius={[8,8,0,0]} />
-                <Bar dataKey="blocked" name="Rate Limited" fill="#ef4444" radius={[8,8,0,0]} />
-              </BarChart>
-            </ResponsiveContainer>
-          </div>
+          }
+        >
+          <ResponsiveContainer width="100%" height={280}>
+            <AreaChart data={series} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+              <defs>
+                <linearGradient id="fillAllowed" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={OK} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={OK} stopOpacity={0.02} />
+                </linearGradient>
+                <linearGradient id="fillBlocked" x1="0" y1="0" x2="0" y2="1">
+                  <stop offset="0%" stopColor={BAD} stopOpacity={0.25} />
+                  <stop offset="100%" stopColor={BAD} stopOpacity={0.02} />
+                </linearGradient>
+              </defs>
+              <CartesianGrid stroke="#e2e8f0" strokeDasharray="3 3" vertical={false} />
+              <XAxis dataKey="label" stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} interval={1} dy={6} />
+              <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} width={36} />
+              <Tooltip
+                contentStyle={{ fontSize: 12, borderRadius: 8, border: '1px solid #e2e8f0', boxShadow: '0 4px 12px rgba(15,23,42,0.08)', fontWeight: 500 }}
+                cursor={{ stroke: '#cbd5e1', strokeDasharray: '3 3' }}
+              />
+              <Area type="monotone" dataKey="allowed" name="Allowed" stroke={OK} strokeWidth={2} fill="url(#fillAllowed)" />
+              <Area type="monotone" dataKey="blocked" name="Blocked" stroke={BAD} strokeWidth={2} fill="url(#fillBlocked)" />
+            </AreaChart>
+          </ResponsiveContainer>
+        </Card>
 
-          {/* Status Distribution Pie Chart */}
-          <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200">
-            <div className="flex items-center justify-between mb-5">
-              <div>
-                <h3 className="font-semibold text-gray-900">Status Distribution</h3>
-                <p className="text-xs text-gray-500 mt-1">Success vs Rate Limited</p>
-              </div>
-              <BarChart3 className="w-5 h-5 text-gray-400" />
-            </div>
-            <ResponsiveContainer width="100%" height={260}>
-              <PieChart>
-                <Pie
-                  data={statusDistribution}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={50}
-                  outerRadius={80}
-                  paddingAngle={3}
-                  dataKey="value"
-                  label={({ percent }) => {
-                    if (!percent) return '';
-                    const percentage = (percent * 100).toFixed(0);
-                    return percentage !== '0' ? `${percentage}%` : '';
-                  }}
-                  labelLine={true}
-                >
-                  {statusDistribution.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} />
-                  ))}
-                </Pie>
-                <Tooltip
-                  formatter={(value: any, name: any) => [`${value} requests`, name]}
-                  contentStyle={{ backgroundColor: 'white', border: '1px solid #e5e7eb', borderRadius: '8px' }}
-                />
-                <Legend
-                  verticalAlign="bottom"
-                  height={36}
-                  wrapperStyle={{ fontSize: '12px', color: '#374151' }}
-                />
-              </PieChart>
-            </ResponsiveContainer>
-          </div>
-        </div>
-
-        {/* Rate Limit Cards */}
-        <div className="mb-8">
-          <div className="flex items-center justify-between mb-5">
-            <div>
-              <h2 className="text-xl font-bold text-gray-900">Rate Limit Rules</h2>
-              <p className="text-sm text-gray-500">Per-endpoint rate limiting configuration</p>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-5">
-            {rateLimits.map((rl, idx) => (
-              <div key={idx} className="bg-white rounded-2xl p-5 shadow-sm border border-gray-200">
-                <div className="flex items-center justify-between mb-3">
-                  <code className="text-sm font-mono bg-gray-100 text-gray-800 px-2 py-1 rounded">{rl.endpoint}</code>
-                  <div className={`w-2 h-2 rounded-full ${rl.remaining > 0 ? 'bg-green-500' : 'bg-red-500'}`}></div>
-                </div>
-                <div className="text-2xl font-bold text-gray-900 mb-1">{rl.limit}</div>
-                <div className="text-xs text-gray-500 mb-3">requests per {rl.window} seconds</div>
-                <div className="relative pt-1">
-                  <div className="flex justify-between text-xs mb-1">
-                    <span className="text-gray-600">Usage</span>
-                    <span className="text-gray-600">{((rl.currentUsage / rl.limit) * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="overflow-hidden h-2 text-xs flex rounded-full bg-gray-200">
-                    <div
-                      style={{ width: `${(rl.currentUsage / rl.limit) * 100}%`, backgroundColor: rl.color }}
-                      className="shadow-none flex flex-col text-center whitespace-nowrap text-white justify-center transition-all duration-500 rounded-full"
-                    ></div>
-                  </div>
-                  <div className="flex justify-between text-xs mt-2">
-                    <span className="text-gray-600">
-                      <Clock className="w-3 h-3 inline mr-1" />
-                      {rl.remaining} remaining
-                    </span>
-                    {rl.resetIn > 0 && (
-                      <span className="text-orange-600 font-medium">
-                        Resets in {rl.resetIn}s
-                      </span>
-                    )}
-                  </div>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Testing Section */}
-        <div className="bg-white rounded-2xl p-6 shadow-sm border border-gray-200 mb-8">
-          <div className="flex flex-wrap items-center justify-between gap-4 mb-5">
-            <div>
-              <h3 className="font-semibold text-gray-900">Test Rate Limiter</h3>
-              <p className="text-xs text-gray-500 mt-1">Send test requests to verify rate limiting</p>
-            </div>
-            <div className="flex flex-wrap gap-3">
-              <select
-                value={selectedEndpoint}
-                onChange={(e) => setSelectedEndpoint(e.target.value)}
-                className="px-4 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-purple-500 text-gray-900 bg-white"
-              >
-                <option value="/login">🔐 /login (5 req/5s)</option>
-                <option value="/api/public">🌐 /api/public (100 req/min)</option>
-              </select>
-              <button
-                onClick={() => sendRequest(selectedEndpoint)}
-                disabled={backendError}
-                className="px-5 py-2 bg-purple-600 text-white rounded-lg text-sm font-medium hover:bg-purple-700 transition flex items-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <Play className="w-4 h-4" />
-                Send Request
-              </button>
-              <button
-                onClick={startLoadTest}
-                disabled={isTesting || backendError}
-                className="px-5 py-2 bg-gray-600 text-white rounded-lg text-sm font-medium hover:bg-gray-700 transition disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-              >
-                {isTesting ? <StopCircle className="w-4 h-4 animate-spin" /> : <Zap className="w-4 h-4" />}
-                {isTesting ? 'Testing...' : 'Load Test'}
-              </button>
-            </div>
-          </div>
-        </div>
-
-        {/* Request Log Table */}
-        <div className="bg-white rounded-2xl shadow-sm border border-gray-200 overflow-hidden">
-          <div className="px-6 py-4 border-b border-gray-200">
-            <h3 className="font-semibold text-gray-900">Recent Requests</h3>
-          </div>
+        <Card title="Routes and token buckets" sub="Each rule has its own bucket per client. Routes on the same rule share it." flush>
           <div className="overflow-x-auto">
-            <table className="w-full text-sm">
-              <thead className="bg-gray-50 border-b border-gray-200">
-                <tr className="text-left text-gray-700">
-                  <th className="px-6 py-3 font-semibold">Time</th>
-                  <th className="px-6 py-3 font-semibold">Endpoint</th>
-                  <th className="px-6 py-3 font-semibold">Status</th>
-                  <th className="px-6 py-3 font-semibold">Response Time</th>
-                  <th className="px-6 py-3 font-semibold">Client IP</th>
+            <table className="w-full text-left text-[13px]">
+              <thead className="border-b border-line-soft bg-canvas/60 text-xs text-muted">
+                <tr>
+                  <th className="px-5 py-2.5 font-semibold">Method</th>
+                  <th className="px-5 py-2.5 font-semibold">Route</th>
+                  <th className="px-5 py-2.5 font-semibold">Rule</th>
+                  <th className="px-5 py-2.5 font-semibold">Bucket</th>
+                  <th className="px-5 py-2.5 font-semibold">Allowed</th>
+                  <th className="px-5 py-2.5 font-semibold">Blocked</th>
+                  <th className="px-5 py-2.5 font-semibold">Status</th>
                 </tr>
               </thead>
               <tbody>
-                {requests.length === 0 ? (
-                  <tr>
-                    <td colSpan={5} className="text-center py-12 text-gray-500">
-                      No requests yet. Send a test request to see data.
-                    </td>
-                  </tr>
-                ) : (
-                  requests.map((req, idx) => (
-                    <tr key={idx} className="border-b border-gray-100 hover:bg-gray-50 transition">
-                      <td className="px-6 py-3 text-gray-600 text-xs">
-                        {new Date(req.timestamp).toLocaleTimeString()}
+                {ROUTES.map((r) => {
+                  const rule = ruleFor(r);
+                  const b = buckets[rule.name];
+                  const tokens = tokensNow(rule);
+                  const pct = (tokens / rule.capacity) * 100;
+                  const isBlocking = !!b && b.blockedUntil > now;
+                  const color = isBlocking || pct < 20 ? BAD : pct < 50 ? WARN : OK;
+                  return (
+                    <tr key={r} className="border-b border-line-soft transition-colors last:border-0 hover:bg-canvas/40">
+                      <td className="px-5 py-3 text-xs font-semibold text-slate-600">GET</td>
+                      <td className="px-5 py-3 font-mono text-xs font-semibold text-slate-900">{r}</td>
+                      <td className="px-5 py-3">
+                        <span className="font-semibold text-slate-900">{rule.name}</span>
+                        <span className="ml-2 text-xs font-medium text-slate-500">{rule.capacity} burst · {rule.refill_rate.toFixed(2)}/s</span>
                       </td>
-                      <td className="px-6 py-3 font-mono text-xs text-gray-800">{req.endpoint}</td>
-                      <td className="px-6 py-3">
-                        <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-full text-xs font-medium ${
-                          req.status === 200 ? 'bg-green-100 text-green-800' :
-                          req.status === 429 ? 'bg-red-100 text-red-800' :
-                          'bg-yellow-100 text-yellow-800'
-                        }`}>
-                          {req.status === 200 ? <CheckCircle className="w-3 h-3" /> : <AlertCircle className="w-3 h-3" />}
-                          {req.status === 200 ? 'Success' : req.status === 429 ? 'Rate Limited' : `Error ${req.status}`}
-                        </span>
+                      <td className="px-5 py-3">
+                        <div className="flex items-center gap-2.5">
+                          <div className="h-1.5 w-28 overflow-hidden rounded-full bg-line">
+                            <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: color }} />
+                          </div>
+                          <span className="tabular text-xs font-semibold text-slate-600">{Math.floor(tokens)}/{rule.capacity}</span>
+                        </div>
                       </td>
-                      <td className="px-6 py-3 text-gray-700 text-xs">{req.responseTime}ms</td>
-                      <td className="px-6 py-3 text-gray-700 text-xs">{req.clientIp}</td>
+                      <td className="tabular px-5 py-3 font-semibold text-slate-900">{logs.filter((l) => l.path === r && l.status >= 200 && l.status < 400).length}</td>
+                      <td className="tabular px-5 py-3 font-semibold text-slate-900">{logs.filter((l) => l.path === r && l.status === 429).length}</td>
+                      <td className="px-5 py-3">
+                        {isBlocking ? (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-bad-soft px-2.5 py-0.5 text-xs font-semibold text-bad">
+                            <span className="h-1.5 w-1.5 rounded-full bg-bad" />
+                            Blocking · {Math.max(1, Math.ceil((b.blockedUntil - now) / 1000))}s
+                          </span>
+                        ) : (
+                          <span className="inline-flex items-center gap-1.5 rounded-full bg-brand-soft px-2.5 py-0.5 text-xs font-semibold text-brand">
+                            <span className="h-1.5 w-1.5 rounded-full bg-brand" />
+                            Accepting
+                          </span>
+                        )}
+                      </td>
                     </tr>
-                  ))
-                )}
+                  );
+                })}
               </tbody>
             </table>
           </div>
-        </div>
+        </Card>
 
-        {/* System Info Footer */}
-        {metrics && (
-          <div className="mt-6 text-center text-xs text-gray-500">
-            <p>Running {metrics.algorithms.join(' + ')} algorithm | Version {metrics.version} | Status: {metrics.status}</p>
-          </div>
-        )}
-      </div>
+        <div className="grid gap-4 lg:grid-cols-3">
+          <Card title="Test console" sub="Send traffic to the live API">
+            <label htmlFor="route" className="mb-1.5 block text-xs font-semibold text-slate-600">Route</label>
+            <select
+              id="route"
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              className="w-full rounded-lg border border-line bg-surface px-3 py-2 text-sm font-semibold text-slate-900 transition-colors focus-visible:border-brand focus-visible:outline-2 focus-visible:outline-offset-0 focus-visible:outline-brand"
+            >
+              {ROUTES.map((r) => <option key={r} value={r}>{r}</option>)}
+            </select>
+            <p className="mt-2.5 text-xs font-medium leading-relaxed text-slate-600">
+              Uses the <span className="font-semibold text-slate-900">{selected.name}</span> rule: bucket of {selected.capacity}, refills {selected.refill_rate.toFixed(2)} tokens per second.
+            </p>
+            <div className="mt-4 grid grid-cols-2 gap-2">
+              <button
+                onClick={() => send(path)}
+                disabled={offline || busy}
+                className="flex items-center justify-center gap-1.5 rounded-lg bg-brand px-3 py-2 text-sm font-semibold text-white shadow-sm shadow-teal-900/20 transition-colors hover:bg-brand-strong disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+              >
+                <Play className="h-3.5 w-3.5" /> Send request
+              </button>
+              <button
+                onClick={burst}
+                disabled={offline || busy}
+                className="flex items-center justify-center gap-1.5 rounded-lg border border-line bg-surface px-3 py-2 text-sm font-semibold text-slate-900 transition-colors hover:bg-canvas disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+              >
+                <Zap className="h-3.5 w-3.5" /> {busy ? 'Sending...' : 'Run burst'}
+              </button>
+            </div>
+            <p className="mt-2.5 text-xs font-medium leading-relaxed text-slate-600">A burst sends more requests than the bucket holds, so you can watch it empty and refill.</p>
+          </Card>
+
+          <Card title="Recent requests" sub="Latest 50" flush className="lg:col-span-2">
+            <div className="max-h-72 overflow-auto">
+              <table className="w-full text-left text-[13px]">
+                <thead className="sticky top-0 z-[1] border-b border-line-soft bg-canvas/80 backdrop-blur text-xs text-muted">
+                  <tr>
+                    <th className="px-5 py-2.5 font-semibold">Time</th>
+                    <th className="px-5 py-2.5 font-semibold">Route</th>
+                    <th className="px-5 py-2.5 font-semibold">Result</th>
+                    <th className="px-5 py-2.5 font-semibold">Tokens left</th>
+                    <th className="px-5 py-2.5 font-semibold">Latency</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {logs.length === 0 ? (
+                    <tr><td colSpan={5} className="px-5 py-12 text-center text-xs font-medium text-slate-500">No requests yet. Use the test console to send one.</td></tr>
+                  ) : (
+                    logs.slice(0, 50).map((l) => {
+                      const [text, cls] = chip(l.status);
+                      return (
+                        <tr key={l.id} className="border-b border-line-soft transition-colors last:border-0 hover:bg-canvas/40">
+                          <td className="tabular px-5 py-2 text-xs font-medium text-slate-500">{new Date(l.ts).toLocaleTimeString([], { hour12: false })}</td>
+                          <td className="px-5 py-2 font-mono text-xs font-semibold text-slate-900">{l.path}</td>
+                          <td className="px-5 py-2"><span className={`rounded-md px-2 py-0.5 text-xs font-semibold ${cls}`}>{text} {l.status || ''}</span></td>
+                          <td className="tabular px-5 py-2 font-semibold text-slate-900">{l.left ?? '—'}</td>
+                          <td className="tabular px-5 py-2 text-xs font-medium text-slate-500">{l.ms} ms</td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+        </div>
+      </main>
     </div>
   );
 }
