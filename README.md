@@ -6,17 +6,18 @@ A full-stack rate limiting service and live dashboard built with **FastAPI**, **
 
 ## What it does
 
-The backend is a Python FastAPI service that uses Redis for atomic, cross-instance rate tracking via a **Lua script** — so the token bucket read-modify-write runs as a single operation and can't race when concurrent requests hit the same client. Redis `TIME` is called inside the script so multiple app instances never disagree on elapsed time. If Redis is down, the limiter falls back to an in-memory store instead of failing closed.
+The backend is a FastAPI service that throttles requests per client and per endpoint using the token bucket algorithm. Bucket state lives in Redis, and each check runs as a single Lua script, so the read, refill and consume steps are atomic and concurrent requests from the same client can't race. The script reads Redis TIME, so multiple app instances never disagree about elapsed time.
 
-The frontend polls `/metrics`, reads `X-RateLimit-*` headers from each response, and renders live traffic, latency (avg/p95), and block-rate KPIs. A built-in test console fires single requests or synthetic bursts so you can watch the bucket drain and refill.
+If Redis is unreachable, the limiter falls back to an in-memory store instead of failing.
 
+The dashboard polls /metrics, reads the X-RateLimit-* headers from each response, and shows live traffic, latency (average and p95), block rate and the state of every bucket. A built-in test console sends single requests or bursts so you can watch a bucket drain and refill.
 
+##Architecutre diagram
 <img width="1616" height="748" alt="image" src="https://github.com/user-attachments/assets/30d3e941-55b2-4b25-b599-516e66a74062" />
-
 
 ## Features
 
-- Token Bucket and Sliding Window rate limiting
+- Token bucket rate limiting with separate burst size and sustained rate per rule
 - Atomic Redis Lua script for race-free consumption
 - Graceful in-memory fallback when Redis is unavailable
 - Per-endpoint rules with configurable capacity and refill rate
@@ -38,7 +39,7 @@ The frontend polls `/metrics`, reads `X-RateLimit-*` headers from each response,
 |----------|------|-------|
 | `/login` | login | 5 burst, refills 1 token/sec |
 | `/` | default | 100 burst, refills ~1.67 tokens/sec |
-| `/api/public` | default | 100 burst, refills ~1.67 tokens/sec |
+| `/api/public` | default | 20 burst, ~1.67 tokens/sec (100 per minute)|
 
 Rules are matched by prefix — the first matching prefix wins, so strict rules sit at the top.
 
