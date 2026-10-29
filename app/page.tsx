@@ -2,15 +2,14 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
-import { Activity, Gauge, Server, ShieldCheck, Play, Zap, RefreshCw, AlertTriangle } from 'lucide-react';
-import { AreaChart, Area, PieChart, Pie, Cell, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
+import { Activity, Gauge, ShieldCheck, Play, Zap, RefreshCw, AlertTriangle } from 'lucide-react';
+import { LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer } from 'recharts';
 
-// set NEXT_PUBLIC_API_BASE in .env.local (or your Vercel env) to point at the deployed API
-const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'http://localhost:8000';
+// set NEXT_PUBLIC_API_BASE in .env.local / Vercel to override
+const API_BASE = process.env.NEXT_PUBLIC_API_BASE ?? 'https://saranyadharani-rate-limiter-api.hf.space';
 
 interface Rule { name: string; prefix: string; capacity: number; refill_rate: number }
 interface Metrics {
-  service: string; status: string; algorithm: string; backend: string; version: string;
   rules: Rule[]; allowed: Record<string, number>; blocked: Record<string, number>;
 }
 interface Log { id: number; ts: number; path: string; status: number; ms: number; left: number | null }
@@ -19,12 +18,12 @@ interface Bucket { remaining: number; ts: number; blockedUntil: number }
 // same shape as the backend RULES, used until /metrics answers
 const DEFAULT_RULES: Rule[] = [
   { name: 'login', prefix: '/login', capacity: 5, refill_rate: 1 },
+  { name: 'public', prefix: '/api/public', capacity: 20, refill_rate: 100 / 60 },
   { name: 'default', prefix: '/', capacity: 100, refill_rate: 100 / 60 },
 ];
 const ROUTES = ['/', '/login', '/api/public'];
-const OK = '#0d9488';
-const BAD = '#e11d48';
-const WARN = '#d97706';
+const TEAL = '#0d9488';
+const ROSE = '#e11d48';
 
 const sum = (o?: Record<string, number>) => Object.values(o ?? {}).reduce((a, b) => a + b, 0);
 
@@ -32,28 +31,32 @@ function Card({ title, sub, right, flush, className = '', children }: {
   title: string; sub?: string; right?: React.ReactNode; flush?: boolean; className?: string; children: React.ReactNode;
 }) {
   return (
-    <section className={`rounded-lg border border-line bg-surface ${className}`}>
-      <header className="flex items-center justify-between gap-3 border-b border-line px-4 py-2.5">
+    <section className={`rounded-2xl border border-gray-200 bg-white shadow-sm ${className}`}>
+      <header className="flex items-center justify-between gap-3 border-b border-gray-200 px-6 py-4">
         <div>
-          <h2 className="text-[13px] font-semibold text-ink">{title}</h2>
-          {sub && <p className="text-xs text-muted">{sub}</p>}
+          <h2 className="text-base font-semibold text-gray-900">{title}</h2>
+          {sub && <p className="mt-0.5 text-[13px] text-gray-500">{sub}</p>}
         </div>
         {right}
       </header>
-      <div className={flush ? '' : 'p-4'}>{children}</div>
+      <div className={flush ? '' : 'p-6'}>{children}</div>
     </section>
   );
 }
 
-function Kpi({ label, value, hint, icon: Icon }: { label: string; value: string; hint: string; icon: typeof Activity }) {
+function Kpi({ label, value, hint, icon: Icon, tint }: {
+  label: string; value: string; hint: string; icon: typeof Activity; tint: string;
+}) {
   return (
-    <div className="rounded-lg border border-line bg-surface px-4 py-3">
-      <div className="flex items-center justify-between text-muted">
-        <span className="text-xs font-medium">{label}</span>
-        <Icon className="h-4 w-4" />
+    <div className="rounded-2xl border border-gray-200 bg-white p-6 shadow-sm">
+      <div className="flex items-start justify-between">
+        <span className="text-[13px] font-medium uppercase tracking-wide text-gray-600">{label}</span>
+        <span className={`flex h-9 w-9 items-center justify-center rounded-lg ${tint}`}>
+          <Icon className="h-[18px] w-[18px]" />
+        </span>
       </div>
-      <div className="tabular mt-1 text-2xl font-semibold text-ink">{value}</div>
-      <div className="text-xs text-muted">{hint}</div>
+      <div className="tabular mt-2 text-3xl font-bold text-gray-900">{value}</div>
+      <div className="mt-1 text-sm text-gray-500">{hint}</div>
     </div>
   );
 }
@@ -87,7 +90,7 @@ export default function Home() {
     return () => clearInterval(poll);
   }, [fetchMetrics]);
 
-  // one clock drives chart window, bucket refill animation and retry countdown
+  // one clock drives the chart window, the bucket refill and the retry countdown
   useEffect(() => {
     setNow(Date.now());
     const tick = setInterval(() => setNow(Date.now()), 500);
@@ -117,9 +120,8 @@ export default function Home() {
   const burst = async () => {
     setBusy(true);
     const rule = ruleFor(path);
-    // small buckets get 3x their size (the browser is slow, it needs to outrun the refill), big ones just a bit over
+    // small buckets get 3x their size (the browser is slow, it has to outrun the refill)
     const count = rule.capacity <= 20 ? rule.capacity * 3 : rule.capacity + 20;
-    // batches of 10 in parallel: still a spike, but the browser and the free space aren't swamped
     for (let i = 0; i < count; i += 10) {
       await Promise.all(Array.from({ length: Math.min(10, count - i) }, () => send(path)));
     }
@@ -127,16 +129,12 @@ export default function Home() {
     setBusy(false);
   };
 
-  // tokens the bucket should hold right now, using the same refill maths as the backend
+  // tokens the bucket should hold right now, same refill maths as the backend
   const tokensNow = (r: Rule) => {
     const b = buckets[r.name];
     if (!b) return r.capacity;
     return Math.min(r.capacity, b.remaining + ((now - b.ts) / 1000) * r.refill_rate);
   };
-
-  const allowed = logs.filter((l) => l.status >= 200 && l.status < 400).length;
-  const blocked = logs.filter((l) => l.status === 429).length;
-  const errors = logs.length - allowed - blocked;
 
   const serverTotal = sum(metrics?.allowed) + sum(metrics?.blocked);
   const blockRate = serverTotal ? (sum(metrics?.blocked) / serverTotal) * 100 : 0;
@@ -162,125 +160,83 @@ export default function Home() {
     return rows;
   }, [logs, now]);
 
-  const pie = [
-    { name: 'Allowed', value: allowed, color: OK },
-    { name: 'Blocked', value: blocked, color: BAD },
-    { name: 'Errors', value: errors, color: WARN },
-  ];
-
   const chip = (s: number): [string, string] =>
-    s >= 200 && s < 400 ? ['Allowed', 'bg-brand-soft text-brand']
-      : s === 429 ? ['Blocked', 'bg-bad-soft text-bad']
-      : ['Error', 'bg-warn-soft text-warn'];
+    s >= 200 && s < 400 ? ['Allowed', 'bg-teal-50 text-teal-700']
+      : s === 429 ? ['Blocked', 'bg-rose-50 text-rose-700']
+        : ['Error', 'bg-amber-50 text-amber-700'];
 
   const selected = ruleFor(path);
 
   return (
-    <div className="min-h-screen">
-      <header className="sticky top-0 z-10 bg-nav">
-        <div className="mx-auto flex h-12 max-w-7xl items-center justify-between px-4">
-          <div className="flex items-center gap-2.5">
-            <div className="flex h-7 w-7 items-center justify-center rounded-md bg-brand">
-              <ShieldCheck className="h-4 w-4 text-white" />
+    <div className="min-h-screen bg-slate-50">
+      <header className="sticky top-0 z-10 bg-[#3f4654]">
+        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
+          <div className="flex items-center gap-3">
+            <div className="flex h-10 w-10 items-center justify-center rounded-xl bg-teal-600">
+              <ShieldCheck className="h-5 w-5 text-white" />
             </div>
-            <span className="text-sm font-semibold text-white">RateLimiter Console</span>
+            <span className="text-lg font-bold text-white">Rate Limiter</span>
           </div>
-          <div className="flex items-center gap-2">
-            {metrics && (
-              <span className="rounded-md bg-white/10 px-2 py-1 text-xs text-slate-300">
-                {metrics.algorithm.replace('_', ' ')} on {metrics.backend}
-              </span>
-            )}
-            <span className={`flex items-center gap-1.5 rounded-md px-2 py-1 text-xs ${offline ? 'bg-bad/20 text-rose-300' : 'bg-brand/20 text-teal-300'}`}>
-              <span className={`h-1.5 w-1.5 rounded-full ${offline ? 'bg-bad' : 'bg-brand'}`} />
+          <div className="flex items-center gap-3">
+            <span className={`flex items-center gap-2 rounded-full px-3 py-1.5 text-sm font-medium ${offline ? 'bg-rose-500/20 text-rose-300' : 'bg-teal-500/20 text-teal-300'}`}>
+              <span className={`h-2 w-2 rounded-full ${offline ? 'bg-rose-400' : 'bg-teal-400'}`} />
               {offline ? 'API unreachable' : 'API healthy'}
             </span>
-            <button onClick={fetchMetrics} aria-label="Refresh metrics" className="rounded-md p-1.5 text-slate-400 hover:bg-white/10 hover:text-white focus-visible:outline-2 focus-visible:outline-brand">
-              <RefreshCw className="h-4 w-4" />
+            <button onClick={fetchMetrics} aria-label="Refresh metrics" className="rounded-lg p-2 text-gray-300 hover:bg-white/10 hover:text-white focus-visible:outline-2 focus-visible:outline-teal-400">
+              <RefreshCw className="h-5 w-5" />
             </button>
           </div>
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl space-y-3 px-4 py-4">
+      <main className="mx-auto max-w-7xl space-y-5 px-6 py-6">
         {offline && (
-          <div className="flex items-center gap-2 rounded-lg border border-warn/30 bg-warn-soft px-3 py-2 text-xs text-warn">
+          <div className="flex items-center gap-2 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
             <AlertTriangle className="h-4 w-4" />
             Cannot reach {API_BASE}. Start the API or check NEXT_PUBLIC_API_BASE.
           </div>
         )}
 
-        <div className="grid grid-cols-2 gap-3 lg:grid-cols-4">
-          <Kpi label="Requests handled" value={serverTotal.toLocaleString()} hint="All clients, since API start" icon={Activity} />
-          <Kpi label="Block rate" value={`${blockRate.toFixed(1)}%`} hint={`${sum(metrics?.blocked).toLocaleString()} requests rejected`} icon={ShieldCheck} />
-          <Kpi label="Latency (this session)" value={`${avg} ms`} hint={`p95 ${p95} ms`} icon={Gauge} />
-          <Kpi label="Rules loaded" value={String(rules.length)} hint={metrics ? `Version ${metrics.version}` : 'Waiting for API'} icon={Server} />
+        <div className="grid grid-cols-1 gap-5 md:grid-cols-3">
+          <Kpi label="Requests handled" value={serverTotal.toLocaleString()} hint="All clients, since API start" icon={Activity} tint="bg-teal-50 text-teal-600" />
+          <Kpi label="Block rate" value={`${blockRate.toFixed(1)}%`} hint={`${sum(metrics?.blocked).toLocaleString()} requests rejected`} icon={ShieldCheck} tint="bg-rose-50 text-rose-600" />
+          <Kpi label="Latency" value={`${avg} ms`} hint={`p95 ${p95} ms · this session`} icon={Gauge} tint="bg-teal-50 text-teal-600" />
         </div>
 
-        <div className="grid gap-3 lg:grid-cols-3">
-          <Card
-            className="lg:col-span-2"
-            title="Traffic"
-            sub="Requests sent from this page, 5 second intervals"
-            right={
-              <div className="flex items-center gap-3 text-xs text-muted">
-                <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-brand" />Allowed</span>
-                <span className="flex items-center gap-1"><span className="h-2 w-2 rounded-full bg-bad" />Blocked</span>
-              </div>
-            }
-          >
-            <ResponsiveContainer width="100%" height={210}>
-              <AreaChart data={series} margin={{ top: 4, right: 4, left: -20, bottom: 0 }}>
-                <CartesianGrid stroke="#e3e8ef" vertical={false} />
-                <XAxis dataKey="label" stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} interval={1} />
-                <YAxis stroke="#64748b" fontSize={11} tickLine={false} axisLine={false} allowDecimals={false} />
-                <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e3e8ef' }} />
-                <Area type="monotone" dataKey="allowed" name="Allowed" stroke={OK} fill={OK} fillOpacity={0.12} strokeWidth={2} />
-                <Area type="monotone" dataKey="blocked" name="Blocked" stroke={BAD} fill={BAD} fillOpacity={0.12} strokeWidth={2} />
-              </AreaChart>
-            </ResponsiveContainer>
-          </Card>
-
-          <Card title="Outcome split" sub="This session">
-            {logs.length === 0 ? (
-              <div className="flex h-[210px] items-center justify-center text-center text-xs text-muted">
-                Send a request to see how traffic is split.
-              </div>
-            ) : (
-              <div>
-                <ResponsiveContainer width="100%" height={150}>
-                  <PieChart>
-                    <Pie data={pie} dataKey="value" innerRadius={42} outerRadius={64} paddingAngle={2} stroke="none">
-                      {pie.map((p) => <Cell key={p.name} fill={p.color} />)}
-                    </Pie>
-                    <Tooltip contentStyle={{ fontSize: 12, borderRadius: 6, border: '1px solid #e3e8ef' }} />
-                  </PieChart>
-                </ResponsiveContainer>
-                <ul className="mt-2 space-y-1 text-xs">
-                  {pie.map((p) => (
-                    <li key={p.name} className="flex items-center justify-between">
-                      <span className="flex items-center gap-1.5 text-muted"><span className="h-2 w-2 rounded-full" style={{ background: p.color }} />{p.name}</span>
-                      <span className="tabular font-medium text-ink">{p.value}</span>
-                    </li>
-                  ))}
-                </ul>
-              </div>
-            )}
-          </Card>
-        </div>
+        <Card
+          title="Traffic"
+          sub="Requests sent from this page, 5 second intervals"
+          right={
+            <div className="flex items-center gap-4 text-sm text-gray-600">
+              <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-teal-600" />Allowed</span>
+              <span className="flex items-center gap-1.5"><span className="h-2.5 w-2.5 rounded-full bg-rose-600" />Blocked</span>
+            </div>
+          }
+        >
+          <ResponsiveContainer width="100%" height={300}>
+            <LineChart data={series} margin={{ top: 8, right: 8, left: -16, bottom: 0 }}>
+              <CartesianGrid stroke="#e5e7eb" strokeDasharray="4 4" vertical={false} />
+              <XAxis dataKey="label" stroke="#6b7280" fontSize={12} tickLine={false} axisLine={false} interval={1} />
+              <YAxis stroke="#6b7280" fontSize={12} tickLine={false} axisLine={false} allowDecimals={false} />
+              <Tooltip contentStyle={{ fontSize: 13, borderRadius: 8, border: '1px solid #e5e7eb' }} />
+              <Line type="monotone" dataKey="allowed" name="Allowed" stroke={TEAL} strokeWidth={2.5} dot={false} />
+              <Line type="monotone" dataKey="blocked" name="Blocked" stroke={ROSE} strokeWidth={2.5} dot={false} />
+            </LineChart>
+          </ResponsiveContainer>
+        </Card>
 
         <Card title="Routes and token buckets" sub="Each rule has its own bucket per client. Routes on the same rule share it." flush>
           <div className="overflow-x-auto">
-            <table className="w-full text-left text-[13px]">
-              <thead className="border-b border-line bg-canvas text-xs text-muted">
+            <table className="w-full text-left text-sm">
+              <thead className="border-b border-gray-200 bg-gray-50 text-gray-600">
                 <tr>
-                  <th className="px-4 py-2 font-medium">Method</th>
-                  <th className="px-4 py-2 font-medium">Route</th>
-                  <th className="px-4 py-2 font-medium">Rule</th>
-                  <th className="px-4 py-2 font-medium">Bucket</th>
-                  <th className="px-4 py-2 font-medium">Allowed</th>
-                  <th className="px-4 py-2 font-medium">Blocked</th>
-                  <th className="px-4 py-2 font-medium">Status</th>
+                  <th className="px-6 py-3 font-medium">Method</th>
+                  <th className="px-6 py-3 font-medium">Route</th>
+                  <th className="px-6 py-3 font-medium">Rule</th>
+                  <th className="px-6 py-3 font-medium">Bucket</th>
+                  <th className="px-6 py-3 font-medium">Allowed</th>
+                  <th className="px-6 py-3 font-medium">Blocked</th>
+                  <th className="px-6 py-3 font-medium">Status</th>
                 </tr>
               </thead>
               <tbody>
@@ -290,32 +246,36 @@ export default function Home() {
                   const tokens = tokensNow(rule);
                   const pct = (tokens / rule.capacity) * 100;
                   const isBlocking = !!b && b.blockedUntil > now;
-                  const color = isBlocking || pct < 20 ? BAD : pct < 50 ? WARN : OK;
+                  const color = isBlocking || pct < 20 ? ROSE : pct < 50 ? '#d97706' : TEAL;
                   return (
-                    <tr key={r} className="border-b border-line last:border-0">
-                      <td className="px-4 py-2.5 text-muted">GET</td>
-                      <td className="px-4 py-2.5 font-mono text-xs text-ink">{r}</td>
-                      <td className="px-4 py-2.5">
-                        <span className="text-ink">{rule.name}</span>
-                        <span className="ml-2 text-xs text-muted">{rule.capacity} burst, {rule.refill_rate.toFixed(2)} per sec</span>
+                    <tr key={r} className="border-b border-gray-100 last:border-0">
+                      <td className="px-6 py-3.5 text-gray-600">GET</td>
+                      <td className="px-6 py-3.5 text-gray-900">{r}</td>
+                      <td className="px-6 py-3.5">
+                        <span className="font-medium text-gray-900">{rule.name}</span>
+                        <span className="ml-2 text-[13px] text-gray-500">{rule.capacity} burst, {rule.refill_rate.toFixed(2)} per sec</span>
                       </td>
-                      <td className="px-4 py-2.5">
-                        <div className="flex items-center gap-2">
-                          <div className="h-1.5 w-28 overflow-hidden rounded-full bg-line">
+                      <td className="px-6 py-3.5">
+                        <div className="flex items-center gap-3">
+                          <div className="h-2 w-36 overflow-hidden rounded-full bg-gray-200">
                             <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct}%`, background: color }} />
                           </div>
-                          <span className="tabular text-xs text-muted">{Math.floor(tokens)}/{rule.capacity}</span>
+                          <span className="tabular text-gray-600">{Math.floor(tokens)}/{rule.capacity}</span>
                         </div>
                       </td>
-                      <td className="tabular px-4 py-2.5 text-ink">{logs.filter((l) => l.path === r && l.status >= 200 && l.status < 400).length}</td>
-                      <td className="tabular px-4 py-2.5 text-ink">{logs.filter((l) => l.path === r && l.status === 429).length}</td>
-                      <td className="px-4 py-2.5">
+                      <td className="tabular px-6 py-3.5 text-gray-900">{logs.filter((l) => l.path === r && l.status >= 200 && l.status < 400).length}</td>
+                      <td className="tabular px-6 py-3.5 text-gray-900">{logs.filter((l) => l.path === r && l.status === 429).length}</td>
+                      <td className="px-6 py-3.5">
                         {isBlocking ? (
-                          <span className="rounded-md bg-bad-soft px-2 py-0.5 text-xs font-medium text-bad">
+                          <span className="inline-flex items-center gap-1.5 rounded-md bg-rose-50 px-3 py-1 text-sm font-medium text-rose-700">
+                            <span className="h-1.5 w-1.5 rounded-full bg-rose-500" />
                             Blocking, retry in {Math.max(1, Math.ceil((b.blockedUntil - now) / 1000))}s
                           </span>
                         ) : (
-                          <span className="rounded-md bg-brand-soft px-2 py-0.5 text-xs font-medium text-brand">Accepting</span>
+                          <span className="inline-flex items-center gap-1.5 rounded-md bg-teal-50 px-3 py-1 text-sm font-medium text-teal-700">
+                            <span className="h-1.5 w-1.5 rounded-full bg-teal-500" />
+                            Accepting
+                          </span>
                         )}
                       </td>
                     </tr>
@@ -326,64 +286,64 @@ export default function Home() {
           </div>
         </Card>
 
-        <div className="grid gap-3 lg:grid-cols-3">
+        <div className="grid gap-5 lg:grid-cols-3">
           <Card title="Test console" sub="Send traffic to the live API">
-            <label htmlFor="route" className="mb-1 block text-xs font-medium text-muted">Route</label>
+            <label htmlFor="route" className="mb-1.5 block text-sm font-medium text-gray-700">Route</label>
             <select
               id="route"
               value={path}
               onChange={(e) => setPath(e.target.value)}
-              className="w-full rounded-md border border-line bg-surface px-3 py-2 text-sm text-ink focus-visible:outline-2 focus-visible:outline-brand"
+              className="h-11 w-full rounded-lg border border-gray-300 bg-white px-4 text-base text-gray-900 focus-visible:outline-2 focus-visible:outline-teal-500"
             >
               {ROUTES.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
-            <p className="mt-2 text-xs text-muted">
+            <p className="mt-3 text-sm text-gray-500">
               Uses the {selected.name} rule: bucket of {selected.capacity}, refills {selected.refill_rate.toFixed(2)} tokens per second.
             </p>
-            <div className="mt-3 grid grid-cols-2 gap-2">
+            <div className="mt-4 grid grid-cols-2 gap-3">
               <button
                 onClick={() => send(path)}
                 disabled={offline || busy}
-                className="flex items-center justify-center gap-1.5 rounded-md bg-brand px-3 py-2 text-sm font-medium text-white hover:bg-teal-700 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+                className="flex h-12 items-center justify-center gap-2 rounded-lg bg-teal-600 text-base font-medium text-white hover:bg-teal-700 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
               >
-                <Play className="h-3.5 w-3.5" /> Send request
+                <Play className="h-4 w-4" /> Send request
               </button>
               <button
                 onClick={burst}
                 disabled={offline || busy}
-                className="flex items-center justify-center gap-1.5 rounded-md border border-line bg-surface px-3 py-2 text-sm font-medium text-ink hover:bg-canvas disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand"
+                className="flex h-12 items-center justify-center gap-2 rounded-lg border border-gray-300 bg-white text-base font-medium text-gray-900 hover:bg-gray-50 disabled:opacity-50 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-teal-600"
               >
-                <Zap className="h-3.5 w-3.5" /> {busy ? 'Sending...' : 'Run burst'}
+                <Zap className="h-4 w-4" /> {busy ? 'Sending...' : 'Run burst'}
               </button>
             </div>
-            <p className="mt-2 text-xs text-muted">A burst sends more requests than the bucket holds, so you can watch it empty and refill.</p>
+            <p className="mt-3 text-sm text-gray-500">A burst sends more requests than the bucket holds, so you can watch it empty and refill.</p>
           </Card>
 
           <Card title="Recent requests" sub="Latest 50" flush className="lg:col-span-2">
-            <div className="max-h-72 overflow-auto">
-              <table className="w-full text-left text-[13px]">
-                <thead className="sticky top-0 border-b border-line bg-canvas text-xs text-muted">
+            <div className="max-h-[420px] overflow-auto">
+              <table className="w-full text-left text-sm">
+                <thead className="sticky top-0 border-b border-gray-200 bg-gray-50 text-gray-600">
                   <tr>
-                    <th className="px-4 py-2 font-medium">Time</th>
-                    <th className="px-4 py-2 font-medium">Route</th>
-                    <th className="px-4 py-2 font-medium">Result</th>
-                    <th className="px-4 py-2 font-medium">Tokens left</th>
-                    <th className="px-4 py-2 font-medium">Latency</th>
+                    <th className="px-6 py-3 font-medium">Time</th>
+                    <th className="px-6 py-3 font-medium">Route</th>
+                    <th className="px-6 py-3 font-medium">Result</th>
+                    <th className="px-6 py-3 font-medium">Tokens left</th>
+                    <th className="px-6 py-3 font-medium">Latency</th>
                   </tr>
                 </thead>
                 <tbody>
                   {logs.length === 0 ? (
-                    <tr><td colSpan={5} className="px-4 py-10 text-center text-xs text-muted">No requests yet. Use the test console to send one.</td></tr>
+                    <tr><td colSpan={5} className="px-6 py-12 text-center text-gray-500">No requests yet. Use the test console to send one.</td></tr>
                   ) : (
                     logs.slice(0, 50).map((l) => {
                       const [text, cls] = chip(l.status);
                       return (
-                        <tr key={l.id} className="border-b border-line last:border-0">
-                          <td className="tabular px-4 py-1.5 text-muted">{new Date(l.ts).toLocaleTimeString([], { hour12: false })}</td>
-                          <td className="px-4 py-1.5 font-mono text-xs text-ink">{l.path}</td>
-                          <td className="px-4 py-1.5"><span className={`rounded-md px-2 py-0.5 text-xs font-medium ${cls}`}>{text} {l.status || ''}</span></td>
-                          <td className="tabular px-4 py-1.5 text-ink">{l.left ?? '-'}</td>
-                          <td className="tabular px-4 py-1.5 text-muted">{l.ms} ms</td>
+                        <tr key={l.id} className="border-b border-gray-100 last:border-0">
+                          <td className="tabular px-6 py-3 text-gray-600">{new Date(l.ts).toLocaleTimeString([], { hour12: false })}</td>
+                          <td className="px-6 py-3 text-gray-900">{l.path}</td>
+                          <td className="px-6 py-3"><span className={`rounded-md px-2.5 py-1 text-[13px] font-medium ${cls}`}>{text} {l.status || ''}</span></td>
+                          <td className="tabular px-6 py-3 text-gray-900">{l.left ?? '—'}</td>
+                          <td className="tabular px-6 py-3 text-gray-600">{l.ms} ms</td>
                         </tr>
                       );
                     })
